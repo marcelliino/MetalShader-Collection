@@ -1,0 +1,357 @@
+#include <metal_stdlib>
+using namespace metal;
+
+struct FS_INPUT
+{
+    float3 v_normal;
+    float2 v_texcoord;
+};
+
+struct FS_UNIFORM
+{
+    float time;
+    float2 resolution;
+    float3 spectrum;
+    float4 mouse;
+};
+
+//---------- math constants ----------//
+
+constant float π = 3.1415926535;
+constant float e = 2.7182818284;
+constant float ø = 1.6180339887;
+
+
+//---------- math equations ----------//
+
+#define nsin(n) (sin(n)*0.5+0.5)
+#define ncos(n) (cos(n)*0.5+0.5)
+#define ntan(n) (tan(n)*0.5+0.5)
+#define rad(deg) (deg*π/180)
+
+
+//---------- math functions ----------//
+
+float ndot(float2 a, float2 b){
+    return a.x*b.x-a.y*b.y;
+}
+
+float2 scale(float2 position, float2 scale){
+    scale = float2(scale.x == 0.0 ? 1.0 : scale.x, scale.y == 0.0 ? 1.0 : scale.y);
+    return position*float2x2(1.0/scale.x, 0.0, 0.0, 1.0/scale.y);
+}
+
+float2 rotate(float2 position, float angle){
+    return position*float2x2(cos(angle), -sin(angle), sin(angle), cos(angle));
+}
+
+float2 stare(float2 position, float2 origin, float2 target){
+    float angle = atan2(target.y-origin.y, target.x-origin.x);
+    return rotate((position-origin), -angle);
+}
+
+
+//---------- 2D primitives -----------//
+
+float circle(float2 position, float radius){
+    return step(radius, length(position));
+}
+
+float vesica(float2 position, float radius, float dist){
+    position = abs(position);
+    dist = (1-dist)*radius;
+    float b = sqrt(radius*radius-dist*dist);
+    return (position.y-b)*dist > position.x*b
+        ? step(0.0,length(position-float2(0.0,b)))
+        : step(0.0,length(position-float2(-dist,0.0))-radius);
+}
+
+float line(float2 position, float2 a, float2 b, float w){
+    float t = clamp(dot(position-a, b-a)/dot(b-a, b-a), 0.0, 1.0);
+    float d = length((position-a) - (b-a)*t);
+    return step(w/10, d);
+}
+
+float rect(float2 position, float2 scale){
+    scale = 1 - scale;
+    position = 1-abs(position);
+    float2 shape = float2(step(scale.x, position.x), step(scale.y, position.y));
+    return 1 - shape.x * shape.y;
+}
+
+float rect(float2 position, float2 scale, float radius){
+    radius = clamp(radius, 0.0, 1.0)*min(scale.x, scale.y);
+    float shape = rect(position, scale);
+    for(float i=-1;i<=1;i+=2){
+        for(float j=-1;j<=1;j+=2){
+            float pcorner = rect(rotate((position+float2(scale.x*i,scale.y*j)), rad(45)), radius*0.75);
+            float rcorner = circle(position+float2((scale.x-radius)*i,(scale.y-radius)*j),radius);
+            shape = min(max(shape, 1-pcorner), rcorner);
+        }
+    }
+    return shape;
+}
+
+float rhombus(float2 position, float2 scale){
+    float2 q = abs(position);
+    float h = clamp((-2.0*ndot(q, scale)+ndot(scale, scale))/dot(scale, scale), -1.0, 1.0);
+    float d = length(q-0.5*scale*float2(1.0-h, 1.0+h));
+    return step(0, d*sign(q.x*scale.y + q.y*scale.x - scale.x*scale.y));
+}
+
+float poly(float2 position, float apothem, float sides){
+    position = rotate(position, π);
+    float angle = atan2(position.x, position.y);
+    float slice = π * 2.0 / sides;
+    return step(apothem, cos(floor(0.5 + angle / slice) * slice - angle) * length(position));
+}
+
+float poly(float2 position, float apothem, float sides, float round){
+    sides = clamp(floor(sides+0.5), 3, 15);
+    round = clamp(round, 0.0, 1.0);
+    float shape = poly(position, apothem, sides);
+    float radius = apothem/cos(π/sides);
+    float offset = cos(π/sides)*(round*apothem);
+    float cutter = poly(rotate(position, π/sides), radius*(1-round)+offset, sides);
+    shape = max(shape, cutter);
+    if(int(sides) % 2 == 0) position = rotate(position, π/sides);
+    for(int i = 0; i < sides; i++){
+        position = rotate(position, 2*π/sides);
+        shape = min(shape, max(circle(position-float2(0, radius*(1-round)), round*apothem), 1-cutter));
+    }
+    return shape;
+}
+
+
+//---------- other 2D shapes ----------//
+
+float wave(float2 position, float f, float a){
+    return step(position.y+cos(position.x*f)*a, 0);
+}
+
+
+//---------- procedural patterns ------//
+
+float hypno(float2 position, float size){
+    size *= 10;
+    float shape = circle(position, size/10);
+    for(float i = size-1 ; i > 0 ; i--){
+        if(int(size) % 2 != 0){
+            if(int(i) % 2 == 0){
+                shape = max(shape, 1-circle(position, i/10));
+            }else{
+                shape = min(shape, circle(position, i/10));
+            }
+        }else{
+            if(int(i) % 2 != 0){
+                shape = max(shape, 1-circle(position, i/10));
+            }else{
+                shape = min(shape, circle(position, i/10));
+            }
+        }
+    }
+    return shape;
+}
+
+float hypno(float2 position, float size, float side){
+    size *= 10;
+    float shape = poly(position, size/10, side);
+    for(float i = size-1 ; i > 0 ; i--){
+        if(int(size) % 2 != 0){
+            if(int(i) % 2 == 0){
+                shape = max(shape, 1-poly(position, i/10, side));
+            }else{
+                shape = min(shape, poly(position, i/10, side));
+            }
+        }else{
+            if(int(i) % 2 != 0){
+                shape = max(shape, 1-poly(position, i/10, side));
+            }else{
+                shape = min(shape, poly(position, i/10, side));
+            }
+        }
+    }
+    return shape;
+}
+
+
+//---------- color formulas ----------//
+
+#define uRGB(r, g, b) float3(r/255.0, g/255.0, b/255.0)
+float3 tHSB(float3 c){
+    float4 K = float4(0.0, -1.0/3.0, 2.0/3.0, -1.0);
+    float4 p = mix(float4(c.bg, K.wz), float4(c.gb, K.xy), step(c.b, c.g));
+    float4 q = mix(float4(p.xyw, c.r), float4(c.r, p.yzx), step(p.x, c.r));
+    float d = q.x - min(q.w, q.y);
+    float e = 1.0e-10;
+    return float3(abs(q.z+(q.w-q.y)/(6.0*d+e)), d/(q.x+e), q.x);
+}
+
+#define uHSB(h, s, b) float3(h/360.0, s/100.0, b/100.0)
+float3 fHSB(float3 c){
+    float3 rgb = clamp(abs(fmod(c.x*6.0+float3(0.0,4.0,2.0), 6.0)-3.0)-1.0, 0.0, 1.0 );
+    rgb = rgb*rgb*(3.0-2.0*rgb);
+    return c.z * mix(float3(1.0), rgb, c.y);
+}
+
+
+//---------- color definitions -------//
+
+#define grey float3(0.5)
+#define red float3(1, 0, 0)
+#define green float3(0, 1, 0)
+#define blue float3(0, 0, 1)
+
+
+//---------- blend modes -------------//
+
+float4 normal(float4 a, float4 b){
+    a.rgb = max(a.rgb, 1.0-b.a);
+    return min(a, b);
+}
+float4 multiply(float4 a, float4 b){
+    return float4((a*b).rgb, b.a);
+}
+float4 linearBurn(float4 a, float4 b){
+    return float4(((a+b)-1.0).rgb, b.a);
+ }
+float4 colorBurn(float4 a, float4 b){
+    return float4((1.0-(1.0-a)/b).rgb, b.a);
+}
+float4 darken(float4 a, float4  b){
+    return float4(min(a, b).rgb, b.a);
+}
+float4 lighten(float4 a, float4  b){
+    return float4(max(a, b).rgb, b.a);
+}
+float4 screen(float4 a, float4 b){
+    return float4((1.0-(1.0-a)*(1.0-b)).rgb, b.a);
+}
+float4 add(float4 a, float4 b){
+    return float4((a+b).rgb, b.a);
+}
+float4 colorDodge(float4 a, float4 b){
+    return float4((a/(1.0-b)).rgb, b.a);
+}
+float4 overlay(float4 a, float4 b){
+    float4 c = 0.0;
+    c.r = a.r < 0.5 ? multiply(a, 2.0*b).r : screen(a, 2.0*(b-0.5)).r;
+    c.g = a.g < 0.5 ? multiply(a, 2.0*b).g : screen(a, 2.0*(b-0.5)).g;
+    c.b = a.b < 0.5 ? multiply(a, 2.0*b).b : screen(a, 2.0*(b-0.5)).b;
+    c.a = b.a;
+    return normal(a, c);
+}
+float4 hardLight(float4 a, float4 b){
+    float4 c = 0.0;
+    c.r = b.r < 0.5 ? multiply(a, 2.0*b).r : screen(a, 2.0*(b-0.5)).r;
+    c.g = b.g < 0.5 ? multiply(a, 2.0*b).g : screen(a, 2.0*(b-0.5)).g;
+    c.b = b.b < 0.5 ? multiply(a, 2.0*b).b : screen(a, 2.0*(b-0.5)).b;
+    c.a = b.a;
+    return normal(a, c);
+}
+
+float4 softLight(float4 a, float4 b){
+    return normal(a, float4(((1-2*b)*a*a+2*b*a).rgb, b.a));
+}
+float4 vividLight(float4 a, float4 b){
+    float4 c = 0;
+    c.r = b.r < 0.5 ? colorBurn(a, 2*b).r : colorDodge(a, 2*(b-0.5)).r;
+    c.g = b.g < 0.5 ? colorBurn(a, 2*b).g : colorDodge(a, 2*(b-0.5)).g;
+    c.b = b.b < 0.5 ? colorBurn(a, 2*b).b : colorDodge(a, 2*(b-0.5)).b;
+    c.a = b.a;
+    return normal(a, c);
+}
+float4 linearLight(float4 a, float4 b){
+    float4 c = 0;
+    c.r = b.r < 0.5 ? linearBurn(a, 2*b).r : add(a, 2*(b-0.5)).r;
+    c.g = b.g < 0.5 ? linearBurn(a, 2*b).g : add(a, 2*(b-0.5)).g;
+    c.b = b.b < 0.5 ? linearBurn(a, 2*b).b : add(a, 2*(b-0.5)).b;
+    c.a = b.a;
+    return c;
+}
+float4 pinLight(float4 a, float4 b){
+    float4 c = 0;
+    c.r = b.r < 0.5 ? darken(a, 2*b).r : lighten(a, 2*(b-0.5)).r;
+    c.g = b.g < 0.5 ? darken(a, 2*b).g : lighten(a, 2*(b-0.5)).g;
+    c.b = b.b < 0.5 ? darken(a, 2*b).b : lighten(a, 2*(b-0.5)).b;
+    c.a = b.a;
+    return normal(a, c);
+}
+float4 hardMix(float4 a, float4 b){
+    return normal(a, float4(ceil(linearLight(a, b)).rgb, b.a));
+}
+float4 exclusion(float4 a, float4 b){
+    return normal(a, float4(max(a+b-2*a*b, b.a).rgb, b.a));
+}
+float4 difference(float4 a, float4 b){
+    return normal(a, float4(max(abs(a-b), b.a).rgb, b.a));
+}
+float4 subtract(float4 a, float4 b){
+    return normal(a, float4(((a+max(1-b, b.a))-1).rgb, b.a));
+}
+float4 divide(float4 a, float4 b){
+    return normal(a, float4((a/b).rgb, b.a));
+}
+
+#define multiply(a, b) normal(a, multiply(a, b))
+#define linearBurn(a, b) normal(a, linearBurn(a, b))
+#define colorBurn(a, b) normal(a, colorBurn(a, b))
+#define darken(a, b) normal(a, darken(a, b))
+#define lighten(a, b) normal(a, lighten(a, b))
+#define screen(a, b) normal(a, screen(a, b))
+#define add(a, b) normal(a, add(a, b))
+#define colorDodge(a, b) normal(a, colorDodge(a, b))
+#define linearLight(a, b) normal(a, linearLight(a, b))
+
+
+//---------- filters -----------------//
+
+float3 pixelate(float2 position, float resolution){
+    resolution *= 50;
+    float dots = circle(fract(position*resolution-0.5)-0.5, 0.45);
+    return float3(floor(position*resolution+0.5)/resolution, dots);
+}
+
+
+//---------- effects -----------------//
+
+float3 liquid(float2 position, float mult, float2 time){
+    float len;
+    for(int i = 0; i < mult; i++){
+    len = length(position);
+    position.x = position.x + sin(position.y + cos(len-pow(ncos(len), mult/2))) + cos(time.x);
+    position.y = position.y - cos(position.x + sin(len-pow(nsin(len), mult/2))) + sin(time.y);
+    }
+    return float3(position, len);
+}
+
+//--------------------------------------------------//
+
+fragment
+float4 fs_main(
+    FS_INPUT In [[stage_in]],
+    constant FS_UNIFORM& uniform [[buffer(16)]],
+    texture2d<float> prevFrame [[texture(0)]],
+    texture2d<float> prevPass [[texture(1)]],
+    texture2d<float> texture0 [[texture(2)]],
+    texture2d<float> texture1 [[texture(3)]],
+    texture2d<float> texture2 [[texture(4)]],
+    texture2d<float> texture3 [[texture(5)]],
+    sampler prevFrameSmplr [[sampler(0)]],
+    sampler prevPassSmplr [[sampler(1)]],
+    sampler texture0Smplr [[sampler(2)]],
+    sampler texture1Smplr [[sampler(3)]],
+    sampler texture2Smplr [[sampler(4)]],
+    sampler texture3Smplr [[sampler(5)]])
+{
+    float time = uniform.time;
+    float2 res = uniform.resolution;
+    float3 spect = uniform.spectrum;
+    float4 mouse = float4((-1. + 2. * uniform.mouse.xy) * float2(res.x/res.y, -1), uniform.mouse.zw);
+    float2 uv = (-1. + 2. * In.v_texcoord) * float2(res.x/res.y, 1);
+    float4 colorSample = texture0.sample(texture0Smplr, scale(uv, float2(res.x/res.y, -1))*0.5+0.5);
+    float4 col = float4(grey, 1.0);
+//    CODE HERE...
+    
+    return float4(col);
+}
